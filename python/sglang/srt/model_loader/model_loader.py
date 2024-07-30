@@ -149,6 +149,7 @@ class ModelLoader:
                 self.load_config.download_dir,
                 allow_patterns,
                 revision,
+                ignore_patterns=self.load_config.ignore_patterns,
             )
         else:
             hf_folder = model_name_or_path
@@ -174,8 +175,6 @@ class ModelLoader:
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder
             )
-        else:
-            hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
         if len(hf_weights_files) == 0:
             raise RuntimeError(
@@ -193,17 +192,9 @@ class ModelLoader:
         )
         if self.load_config.load_format == LoadFormat.NPCACHE:
             # Currently np_cache only support *.bin checkpoints
-            assert use_safetensors is False
-            weights_iterator = np_cache_weights_iterator(
-                model_name_or_path,
-                self.load_config.download_dir,
-                hf_folder,
-                hf_weights_files,
-            )
+            pass
         elif use_safetensors:
             weights_iterator = safetensors_weights_iterator(hf_weights_files)
-        else:
-            weights_iterator = pt_weights_iterator(hf_weights_files)
 
         return weights_iterator
 
