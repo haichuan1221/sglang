@@ -308,7 +308,6 @@ class TokenizerManager:
                 event = asyncio.Event()
                 state = ReqState([], False, event)
                 self.rid_to_state[rid] = state
-
         # Then wait for all responses
         output_list = []
         for i in range(batch_size):
@@ -341,7 +340,6 @@ class TokenizerManager:
                 )
                 assert state.finished
                 del self.rid_to_state[rid]
-
         yield output_list
 
     def _validate_input_length(self, input_ids: List[int]):
@@ -390,8 +388,13 @@ class TokenizerManager:
                 obj.return_text_in_logprobs,
             )
 
+            # Log requests
             if self.server_args.log_requests and state.finished:
-                logger.info(f"in={obj.text}, out={out}")
+                if obj.text is None:
+                    in_obj = {"text": self.tokenizer.decode(obj.input_ids)}
+                else:
+                    in_obj = {"text": obj.text}
+                logger.info(f"in={in_obj}, out={out}")
 
             state.out_list = []
             if state.finished:

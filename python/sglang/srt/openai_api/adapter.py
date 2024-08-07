@@ -53,6 +53,7 @@ from sglang.srt.openai_api.protocol import (
     CompletionStreamResponse,
     DeltaMessage,
     ErrorResponse,
+    FileDeleteResponse,
     FileRequest,
     FileResponse,
     LogProbs,
@@ -174,6 +175,20 @@ async def v1_files_create(file: UploadFile, purpose: str, file_storage_pth: str 
         return {"error": "Invalid input", "details": e.errors()}
 
 
+async def v1_delete_file(file_id: str):
+    # Retrieve the file job from the in-memory storage
+    file_response = file_id_response.get(file_id)
+    if file_response is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    file_path = file_id_storage.get(file_id)
+    if file_path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    os.remove(file_path)
+    del file_id_response[file_id]
+    del file_id_storage[file_id]
+    return FileDeleteResponse(id=file_id, deleted=True)
+
+
 async def v1_batches(tokenizer_manager, raw_request: Request):
     try:
         body = await raw_request.json()
@@ -287,6 +302,13 @@ async def process_batch(tokenizer_manager, batch_id: str, batch_request: BatchRe
         retrieve_batch = batch_storage[batch_id]
         retrieve_batch.output_file_id = output_file_id
         file_id_storage[output_file_id] = output_file_path
+        file_id_response[output_file_id] = FileResponse(
+            id=output_file_id,
+            bytes=os.path.getsize(output_file_path),
+            created_at=int(time.time()),
+            filename=f"{output_file_id}.jsonl",
+            purpose="batch_result",
+        )
         # Update batch status to "completed"
         retrieve_batch.status = "completed"
         retrieve_batch.completed_at = int(time.time())
@@ -380,7 +402,7 @@ def v1_generate_request(all_requests):
         else:
             prompt_kwargs = {"input_ids": prompt}
     else:
-        if isinstance(prompts[0], str) or isinstance(propmt[0][0], str):
+        if isinstance(prompts[0], str):
             prompt_kwargs = {"text": prompts}
         else:
             prompt_kwargs = {"input_ids": prompts}
@@ -500,7 +522,9 @@ def v1_generate_response(request, ret, tokenizer_manager, to_file=False):
             responses.append(response)
         return responses
     else:
-        prompt_tokens = sum(item["meta_info"]["prompt_tokens"] for item in ret)
+        prompt_tokens = sum(
+            ret[i]["meta_info"]["prompt_tokens"] for i in range(0, len(ret), request.n)
+        )
         completion_tokens = sum(item["meta_info"]["completion_tokens"] for item in ret)
         response = CompletionResponse(
             id=ret[0]["meta_info"]["id"],
@@ -707,8 +731,6 @@ def v1_chat_generate_request(all_requests, tokenizer_manager):
 
 def v1_chat_generate_response(request, ret, to_file=False):
     choices = []
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
 
     for idx, ret_item in enumerate(ret):
         logprobs = False
@@ -747,8 +769,6 @@ def v1_chat_generate_response(request, ret, to_file=False):
             choice_logprobs = ChoiceLogprobs(content=token_logprobs)
         else:
             choice_logprobs = None
-        prompt_tokens = ret_item["meta_info"]["prompt_tokens"]
-        completion_tokens = ret_item["meta_info"]["completion_tokens"]
 
         if to_file:
             # to make the choice data json serializable
@@ -767,8 +787,7 @@ def v1_chat_generate_response(request, ret, to_file=False):
             )
 
         choices.append(choice_data)
-        total_prompt_tokens += prompt_tokens
-        total_completion_tokens += completion_tokens
+
     if to_file:
         responses = []
 
@@ -795,14 +814,18 @@ def v1_chat_generate_response(request, ret, to_file=False):
             responses.append(response)
         return responses
     else:
+        prompt_tokens = sum(
+            ret[i]["meta_info"]["prompt_tokens"] for i in range(0, len(ret), request.n)
+        )
+        completion_tokens = sum(item["meta_info"]["completion_tokens"] for item in ret)
         response = ChatCompletionResponse(
             id=ret[0]["meta_info"]["id"],
             model=request.model,
             choices=choices,
             usage=UsageInfo(
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
             ),
         )
         return response
@@ -930,7 +953,6 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
         ).__anext__()
     except ValueError as e:
         return create_error_response(str(e))
-
     if not isinstance(ret, list):
         ret = [ret]
 

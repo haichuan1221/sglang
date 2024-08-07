@@ -1,25 +1,26 @@
 import json
+import time
 import unittest
 
 import openai
 
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.utils import kill_child_process
-from sglang.test.test_utils import MODEL_NAME_FOR_TEST, popen_launch_server
+from sglang.test.test_utils import DEFAULT_MODEL_NAME_FOR_TEST, popen_launch_server
 
 
 class TestOpenAIServer(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = MODEL_NAME_FOR_TEST
+        cls.model = DEFAULT_MODEL_NAME_FOR_TEST
         cls.base_url = f"http://localhost:8157"
         cls.api_key = "sk-123456"
         cls.process = popen_launch_server(
             cls.model, cls.base_url, timeout=300, api_key=cls.api_key
         )
         cls.base_url += "/v1"
-        cls.tokenizer = get_tokenizer(MODEL_NAME_FOR_TEST)
+        cls.tokenizer = get_tokenizer(DEFAULT_MODEL_NAME_FOR_TEST)
 
     @classmethod
     def tearDownClass(cls):
@@ -44,11 +45,6 @@ class TestOpenAIServer(unittest.TestCase):
         else:
             prompt_arg = prompt_input
             num_choices = 1
-
-        if parallel_sample_num:
-            # FIXME: This is wrong. We should not count the prompt tokens multiple times for
-            # parallel sampling.
-            num_prompt_tokens *= parallel_sample_num
 
         response = client.completions.create(
             model=self.model,
@@ -139,14 +135,17 @@ class TestOpenAIServer(unittest.TestCase):
             model=self.model,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
+                {
+                    "role": "user",
+                    "content": "What is the capital of France? Answer in a few words.",
+                },
             ],
             temperature=0,
-            max_tokens=32,
             logprobs=logprobs is not None and logprobs > 0,
             top_logprobs=logprobs,
             n=parallel_sample_num,
         )
+
         if logprobs:
             assert isinstance(
                 response.choices[0].logprobs.content[0].top_logprobs[0].token, str
@@ -158,6 +157,7 @@ class TestOpenAIServer(unittest.TestCase):
             assert (
                 ret_num_top_logprobs == logprobs
             ), f"{ret_num_top_logprobs} vs {logprobs}"
+
         assert len(response.choices) == parallel_sample_num
         assert response.choices[0].message.role == "assistant"
         assert isinstance(response.choices[0].message.content, str)
@@ -176,7 +176,6 @@ class TestOpenAIServer(unittest.TestCase):
                 {"role": "user", "content": "What is the capital of France?"},
             ],
             temperature=0,
-            max_tokens=32,
             logprobs=logprobs is not None and logprobs > 0,
             top_logprobs=logprobs,
             stream=True,
@@ -209,6 +208,129 @@ class TestOpenAIServer(unittest.TestCase):
             assert response.id
             assert response.created
 
+    def run_batch(self, mode):
+        client = openai.Client(api_key=self.api_key, base_url=self.base_url)
+        if mode == "completion":
+            input_file_path = "complete_input.jsonl"
+            # write content to input file
+            content = [
+                {
+                    "custom_id": "request-1",
+                    "method": "POST",
+                    "url": "/v1/completions",
+                    "body": {
+                        "model": "gpt-3.5-turbo-instruct",
+                        "prompt": "List 3 names of famous soccer player: ",
+                        "max_tokens": 20,
+                    },
+                },
+                {
+                    "custom_id": "request-2",
+                    "method": "POST",
+                    "url": "/v1/completions",
+                    "body": {
+                        "model": "gpt-3.5-turbo-instruct",
+                        "prompt": "List 6 names of famous basketball player:  ",
+                        "max_tokens": 40,
+                    },
+                },
+                {
+                    "custom_id": "request-3",
+                    "method": "POST",
+                    "url": "/v1/completions",
+                    "body": {
+                        "model": "gpt-3.5-turbo-instruct",
+                        "prompt": "List 6 names of famous tenniss player:  ",
+                        "max_tokens": 40,
+                    },
+                },
+            ]
+
+        else:
+            input_file_path = "chat_input.jsonl"
+            content = [
+                {
+                    "custom_id": "request-1",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": "gpt-3.5-turbo-0125",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a helpful assistant.",
+                            },
+                            {
+                                "role": "user",
+                                "content": "Hello! List 3 NBA players and tell a story",
+                            },
+                        ],
+                        "max_tokens": 30,
+                    },
+                },
+                {
+                    "custom_id": "request-2",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": "gpt-3.5-turbo-0125",
+                        "messages": [
+                            {"role": "system", "content": "You are an assistant. "},
+                            {
+                                "role": "user",
+                                "content": "Hello! List three capital and tell a story",
+                            },
+                        ],
+                        "max_tokens": 50,
+                    },
+                },
+            ]
+        with open(input_file_path, "w") as file:
+            for line in content:
+                file.write(json.dumps(line) + "\n")
+        with open(input_file_path, "rb") as file:
+            uploaded_file = client.files.create(file=file, purpose="batch")
+        if mode == "completion":
+            endpoint = "/v1/completions"
+        elif mode == "chat":
+            endpoint = "/v1/chat/completions"
+        completion_window = "24h"
+        batch_job = client.batches.create(
+            input_file_id=uploaded_file.id,
+            endpoint=endpoint,
+            completion_window=completion_window,
+        )
+        while batch_job.status not in ["completed", "failed", "cancelled"]:
+            time.sleep(3)
+            print(
+                f"Batch job status: {batch_job.status}...trying again in 3 seconds..."
+            )
+            batch_job = client.batches.retrieve(batch_job.id)
+        assert batch_job.status == "completed"
+        assert batch_job.request_counts.completed == len(content)
+        assert batch_job.request_counts.failed == 0
+        assert batch_job.request_counts.total == len(content)
+
+        result_file_id = batch_job.output_file_id
+        file_response = client.files.content(result_file_id)
+        result_content = file_response.read()
+
+        if mode == "completion":
+            result_file_name = "batch_job_complete_results.jsonl"
+        else:
+            result_file_name = "batch_job_chat_results.jsonl"
+        with open(result_file_name, "wb") as file:
+            file.write(result_content)
+        results = []
+        with open(result_file_name, "r", encoding="utf-8") as file:
+            for line in file:
+                json_object = json.loads(line.strip())
+                results.append(json_object)
+        for delete_fid in [uploaded_file.id, result_file_id]:
+            del_pesponse = client.files.delete(delete_fid)
+            assert del_pesponse.deleted
+        assert len(results) == len(content)
+
     def test_completion(self):
         for echo in [False, True]:
             for logprobs in [None, 5]:
@@ -238,6 +360,10 @@ class TestOpenAIServer(unittest.TestCase):
     def test_chat_completion_stream(self):
         for logprobs in [None, 5]:
             self.run_chat_completion_stream(logprobs)
+
+    def test_batch(self):
+        for mode in ["completion", "chat"]:
+            self.run_batch(mode)
 
     def test_regex(self):
         client = openai.Client(api_key=self.api_key, base_url=self.base_url)
