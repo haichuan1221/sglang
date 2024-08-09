@@ -14,7 +14,7 @@ class TestOpenAIServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MODEL_NAME_FOR_TEST
-        cls.base_url = f"http://localhost:8157"
+        cls.base_url = "http://127.0.0.1:8157"
         cls.api_key = "sk-123456"
         cls.process = popen_launch_server(
             cls.model, cls.base_url, timeout=300, api_key=cls.api_key
@@ -98,10 +98,17 @@ class TestOpenAIServer(unittest.TestCase):
             echo=echo,
             logprobs=logprobs,
             stream=True,
+            stream_options={"include_usage": True},
         )
 
         first = True
         for response in generator:
+            usage = response.usage
+            if usage is not None:
+                assert usage.prompt_tokens > 0
+                assert usage.completion_tokens > 0
+                assert usage.total_tokens > 0
+                continue
             if logprobs:
                 assert response.choices[0].logprobs
                 assert isinstance(response.choices[0].logprobs.tokens[0], str)
@@ -122,12 +129,8 @@ class TestOpenAIServer(unittest.TestCase):
                         prompt
                     ), f"{response.choices[0].text} and all args {echo} {logprobs} {token_input} {first}"
                 first = False
-
             assert response.id
             assert response.created
-            assert response.usage.prompt_tokens > 0
-            assert response.usage.completion_tokens > 0
-            assert response.usage.total_tokens > 0
 
     def run_chat_completion(self, logprobs, parallel_sample_num):
         client = openai.Client(api_key=self.api_key, base_url=self.base_url)
@@ -179,11 +182,20 @@ class TestOpenAIServer(unittest.TestCase):
             logprobs=logprobs is not None and logprobs > 0,
             top_logprobs=logprobs,
             stream=True,
+            stream_options={"include_usage": True},
         )
 
         is_first = True
         for response in generator:
+            usage = response.usage
+            if usage is not None:
+                assert usage.prompt_tokens > 0
+                assert usage.completion_tokens > 0
+                assert usage.total_tokens > 0
+                continue
+
             data = response.choices[0].delta
+
             if is_first:
                 data.role == "assistant"
                 is_first = False
@@ -313,22 +325,12 @@ class TestOpenAIServer(unittest.TestCase):
 
         result_file_id = batch_job.output_file_id
         file_response = client.files.content(result_file_id)
-        result_content = file_response.read()
-
-        if mode == "completion":
-            result_file_name = "batch_job_complete_results.jsonl"
-        else:
-            result_file_name = "batch_job_chat_results.jsonl"
-        with open(result_file_name, "wb") as file:
-            file.write(result_content)
-        results = []
-        with open(result_file_name, "r", encoding="utf-8") as file:
-            for line in file:
-                json_object = json.loads(line.strip())
-                results.append(json_object)
-        for delete_fid in [uploaded_file.id, result_file_id]:
-            del_pesponse = client.files.delete(delete_fid)
-            assert del_pesponse.deleted
+        result_content = file_response.read().decode("utf-8")  # Decode bytes to string
+        results = [
+            json.loads(line)
+            for line in result_content.split("\n")
+            if line.strip() != ""
+        ]
         assert len(results) == len(content)
 
     def test_completion(self):
